@@ -1,0 +1,177 @@
+---
+title: "Week 12 - Assignment"
+author: "Jose Luis Rodriguez Gil"
+date: "29/11/2022"
+output: 
+  html_document:
+    number_sections: true
+    keep_md: true
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, include=FALSE}
+
+library(tidyverse)
+library(janitor)
+library(here)
+library(gt)
+
+library(broom) # Needed to tidy-up model outputs
+
+```
+
+```{r my theme, include=FALSE}
+
+source(here("functions", "theme_pepe_full.R"))
+
+theme_set(theme_pepe_full())  #Sets the theme for all ggplot plots in this .Rmd file (no need to call it in the plot itself)
+
+
+```
+
+
+# Read the data
+
+The first thing we need to do is to read the data. Notice that this is a text file, so we will nee dto use the `read_delim()` function. Exploring the file we see that the separator is a tab.
+
+```{r, message=FALSE}
+
+beach_data_original <- read_delim(here("data", "beach_data.txt"), delim = "\t")
+
+
+beach_data_original
+
+```
+
+
+Remember this is data collected from nine inter-tidal areas along the Dutch coast as presented in [Zuur et al. (2007)](https://highstat.com/index.php/analysing-ecological-data). For this assignment we are going to focus on the relationship between tow variables:  **species richness** (the number of different species) and **NAP** (the height of a sampling station compared to mean tidal level). or more precisely wether NAP has an influence on species richness. We will be assessing this relationship for each of the 9 beaches that were sampled for this study.
+
+# Data clean up
+
+First we will do some basic clean up of the variable names and to make our life a bit easier we will just select the variables we need: beach, richness and nap
+
+```{r}
+
+beach_data <- beach_data_original %>% 
+  clean_names() %>% 
+  select(beach, richness, nap)
+
+beach_data
+
+```
+
+
+# Model fits
+
+Now we are going to run the `lm()` for `richness` (the y) vs `nap` (the x). In order to make the results easier to handle, we want to extract the most relevant data from these models into their own columns. 
+
+```{r}
+
+beach_data_and_lm <- beach_data %>% 
+  group_by(beach) %>% 
+  nest() %>% 
+  mutate(model = pmap(list(data),
+                   ~ lm(richness ~ nap, data = ..1))) %>%  # Main model fit
+  mutate(intercept = map_dbl(.x = model,
+                             ~ round(tidy(.x)$estimate[1], digits = 3)), # extract the intercept into its own column
+         slope = map_dbl(.x = model,
+                         ~ round(tidy(.x)$estimate[2], digits = 4)), # extract the slope into its own column
+         r_squared = map_dbl(.x = model,
+                             ~ round(glance(.x)$r.squared, digits = 3)), # extract the r_squared into its own column
+         p_value = map_dbl(.x = model,
+                           ~ round(glance(.x)$p.value, digits = 3)) # extract the p_value into its own column
+  )
+
+beach_data_and_lm
+
+```
+
+Now let's format it a bit with `gt()` so it is easier to read by humans. One "problem" here is that we have the columns `data` and `model` which are filled with datasets. Those cannot be placed in a regular table, so we will remove them before we apply `gt()`.
+
+Also remember that currently the data set is grouped by beach. If left untouched, it will create individual "groups" for each beach in the table, which is not needed and will look weird. We will ungroup before to avoid this.
+
+```{r}
+
+beach_data_and_lm %>% 
+  select(-data, -model) %>% 
+  ungroup() %>% 
+  gt() %>% 
+  tab_header(
+    title = md("**Species richness vs NAP**"),
+    subtitle = "Summary of the regression of species richness vs height of the sampling site for each of the studied beaches")
+
+```
+
+# Plots
+
+Lets take a look at all the data toguether just to get an idea of how the data looks and help us select some values for the location of the annotations and scales.
+
+```{r}
+
+beach_data %>% 
+  ggplot() +
+  geom_point(aes(x = nap, y = richness, colour = factor(beach)))
+
+```
+
+Now that we have a consolidated tibble with the data, the models, and the main descriptors of the regression, we can use this to create our plots.
+
+```{r}
+
+beach_plot <- beach_data_and_lm %>% 
+  mutate(plot = pmap(list(data, beach, intercept, slope, r_squared),
+                     ~ ggplot() +
+                       geom_point(data = ..1, aes(x = nap, y = richness), alpha = 0.4, stroke = 0) +
+                       geom_smooth(data = ..1, aes(x = nap, y = richness), method = "lm", 
+                                   colour = "blue", size = 0.4) +
+                       
+                       annotate(geom = "text",
+                                x = 1,
+                                y = 30,
+                                label = str_c("y = ", ..3, " + ", ..4 ,"x", sep = ""),
+                                hjust = 0,
+                                vjust = 0,
+                                size = 3.5) +
+                       
+                       annotate(geom = "text",
+                                x = 1,
+                                y = 28,
+                                label = str_c('R^2 == ', ..5),
+                                parse = TRUE,
+                                hjust = 0,
+                                vjust = 0, 
+                                size = 3.5) +
+                       
+                       coord_cartesian(xlim = c(min(beach_data$nap, na.rm = TRUE), max(beach_data$nap, na.rm = TRUE)),
+                                       ylim = c(0, max(beach_data$richness, na.rm = TRUE)*1.5),
+                                       expand = expansion(mult = 0, add = 0)) +
+                       
+                       labs(title = str_c("Beach", ..2, sep = " "),
+                            x = "NAP (m)",
+                            y = "Species richness")),
+         
+         filename = str_c("beach_", beach, "_plot.pdf", sep = "")) %>% 
+  ungroup() %>% 
+  select(plot, filename)
+
+beach_plot
+
+```
+
+
+Now that we have a simplified tibble with just the plots and the given file names, i can use `pwalk()` to walk through the list and apply `ggsave()` to each of them
+
+```{r}
+  
+beach_plot %>% 
+  pwalk(ggsave,                    # what we want to do as we walk thorugh the object   
+        path =  here("figures"),   # where we want to save it
+        width = 120, height = 120, units = "mm") # other things you need for ggsave
+```
+
+
